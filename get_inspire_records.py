@@ -7,42 +7,97 @@ The query will break the full list down to `list_size` (e.g. 50 or 250)
 records per file. The search can be continued with keyword `jrec`.
 All the results are kept on separate files. Result format is MARCXML.
 
+You can use this as a stand-alone script or a module in another python code.
+`fetch_records` can either return list if XML record strings or write the strings
+to files and return a list of filepaths.
+
+Example usage:
+    python get_inspire_records.py -p 'tc proceedings and 773__p:Nucl.Instrum.Meth.' -o 'inspire_xmls'
+
 """
+
+from __future__ import print_function
 
 import os
 import sys
 import re
 import getopt
 
-from tempfile import mkdtemp, mkstemp
+from tempfile import mkstemp
 
-from invenio_client import InvenioConnector
 import getpass
-import logging
+# import logging  # FIXME: do we want fancy logging?
 
 from lxml import etree
 
+import splinter
+from splinter.exceptions import ElementDoesNotExist
 
+from invenio_client import InvenioConnector
 
-def fetch_records(outdir, inspire_pattern, list_size):
+class FixedConnector(InvenioConnector):
+    """By default InvenioConnector is using phantomjs, which doesn't work.
+
+    Have to override the browser initialization here.
+    $ pip install splinter[zope.testbrowser]
+    """
+    def _init_browser(self):
+        """Overide in appropriate way to prepare a logged in browser."""
+        self.browser = splinter.Browser('zope.testbrowser')
+        self.browser.visit(self.server_url + "/youraccount/login")
+        try:
+            self.browser.fill('nickname', self.user)
+            self.browser.fill('password', self.password)
+        except ElementDoesNotExist:
+            self.browser.fill('p_un', self.user)
+            self.browser.fill('p_pw', self.password)
+        # FIXME: what is this and why it doesn't work:
+        # self.browser.fill('login_method', self.login_method)
+        self.browser.find_by_css('input[type=submit]').click()
+
+def fetch_records(inspire_pattern, list_size, outdir=None):
     """Get records from Inspire with InvenioConnector and write to file."""
-    if not os.path.exists(outdir):
+    if outdir and not os.path.exists(outdir):
         os.makedirs(outdir)
     files_created = []
+    records_fetched = []
+
+    def write_to_file(records, startpoint):
+        """Write records to file.
+
+        Ideally n_records == list_size
+        """
+        n_records = get_number_of_records_in_batch(records)
+        _, outfile = mkstemp(prefix="records" + str(startpoint) + "_", dir=outdir, suffix=".xml")
+        with open(outfile, "w") as f:
+            f.write(records)
+        print("Wrote " + str(n_records) + " INSPIRE records to file " + outfile)
+        files_created.append(outfile)
+
+    def move_to_next_startpoint(startpoint, list_size):
+        """Increment startpoint counter.
+
+        Startpoint is used when INSPIRE breaks the result list to multiple
+        batches of list_size results.
+        """
+        return startpoint + list_size + 1
 
     if "*" in inspire_pattern:
         # Have to add `wl=0` to make wildcards function properly.
         # This requires authentication.
         uname = raw_input("Inspire login: ")
         pword = getpass.getpass()
-        inspire = InvenioConnector(
+        inspire = FixedConnector(
             "https://inspirehep.net",
             user=uname,
             password=pword
             )
     else:
-        inspire = InvenioConnector("https://inspirehep.net")
+        inspire = FixedConnector("https://inspirehep.net")
 
+
+    # Get the first batch
+    startpoint = 0
     records = inspire.search(
         p=inspire_pattern,
         of="xm",
@@ -50,24 +105,21 @@ def fetch_records(outdir, inspire_pattern, list_size):
         wl=0
         )
 
-    n_records = get_number_of_records_in_batch(records)
+    # Get total number of search results
     total_amount = get_total_number_of_records(records)
     if not total_amount:
         print("No records found.")
         sys.exit()
     print("Total amount of results: " + total_amount)
 
-    _, outfile = mkstemp(prefix="records1" + "_", dir=outdir, suffix=".xml")
-
-    with open(outfile, "w") as f:
-        f.write(records)
-    startpoint = list_size + 1
-    print("Wrote " + str(n_records) + " records to file " + outfile)
-    files_created.append(outfile)
-
+    # Get all the rest
     while startpoint < int(total_amount):
-        # XML files of `list_size` records will be written to directory "inspire_xmls/".
-        # total_amount is the total number of search results.
+        if outdir:
+            write_to_file(records, startpoint)
+        else:
+            records_fetched.append(records)
+        startpoint = move_to_next_startpoint(startpoint, list_size)
+
         records = inspire.search(
             p=inspire_pattern,
             of="xm",
@@ -75,20 +127,15 @@ def fetch_records(outdir, inspire_pattern, list_size):
             jrec=startpoint,
             wl=0)
 
-        n_records = get_number_of_records_in_batch(records)
-        _, outfile = mkstemp(prefix="records" + str(startpoint) + "_", dir=outdir, suffix=".xml")
+    if outdir:
+        return files_created
+    else:
+        return records_fetched
 
-        with open(outfile, "w") as f:
-            f.write(records)
-        startpoint += list_size + 1
-        print("Wrote " + str(n_records) + " records to file " + outfile)
-        files_created.append(outfile)
-
-    return files_created
 
 
 def get_number_of_records_in_batch(records_string):
-    """Get the number of record nodes in a XML string."""
+    """Get the number of record nodes in an XML string."""
     collection = etree.fromstring(records_string)
     return len(collection.xpath("//*[local-name()='record']"))
 
@@ -113,11 +160,12 @@ def main(argv=None):
     inspire_pattern = ""
     helptext = 'USAGE: \n\t python get_inspire_records.py -p <pattern> [-o <outdir> -r <recid_file>]'
 
-    #parse search pattern and optional output dir from the arguments
+    # Parse search pattern and optional output dir from the arguments
     try:
-        opts, args = getopt.getopt(argv,
-                                   "ho:p:r:l:",
-                                   ["outdir=", "pattern=", "recid_file=", "list_size="]
+        opts, _ = getopt.getopt(
+            argv,
+            "ho:p:r:l:",
+            ["outdir=", "pattern=", "recid_file=", "list_size="]
         )
     except getopt.GetoptError:
         print(helptext)
@@ -128,13 +176,13 @@ def main(argv=None):
             sys.exit()
         elif opt in ("-o", "--ofile"):
             outdir = os.path.join(arg, '')
-            #argv = argv[2:]
         elif opt in ("-l", "--list_size"):
-            list_size = arg # should be int
+            list_size = arg  # should be int
         elif opt in ("-p", "--pattern"):
             inspire_pattern = arg
         elif opt in ("-r", "--recid_file"):
-            with open(arg, "r") as f: recids = f.read().split()
+            with open(arg, "r") as f:
+                recids = f.read().split()
             if recids:
                 inspire_pattern = "recid " + " or ".join(recids)
     if not argv:
@@ -147,8 +195,8 @@ def main(argv=None):
     print("Inspire search pattern: " + inspire_pattern)
 
     # TEST pattern:
-    #inspire_pattern = 'tc proceedings and 773__p:Nucl.Instrum.Meth.'
-    fetch_records(outdir, inspire_pattern, list_size)
+    # inspire_pattern = 'tc proceedings and 773__p:Nucl.Instrum.Meth.'
+    fetch_records(inspire_pattern, list_size, outdir=outdir)
 
 
 if __name__ == "__main__":
