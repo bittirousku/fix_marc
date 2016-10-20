@@ -51,12 +51,15 @@ class FixedConnector(InvenioConnector):
         except ElementDoesNotExist:
             self.browser.fill('p_un', self.user)
             self.browser.fill('p_pw', self.password)
-        # FIXME: what is this and why it doesn't work:
-        # self.browser.fill('login_method', self.login_method)
         self.browser.find_by_css('input[type=submit]').click()
 
 def fetch_records(inspire_pattern, list_size, outdir=None):
-    """Get records from Inspire with InvenioConnector and write to file."""
+    """Get records from Inspire with InvenioConnector and write to file.
+
+    :param inspire_pattern: Inspire query
+    :param list_size: desired result list
+    :param outdir: optional output directory
+    """
     if outdir and not os.path.exists(outdir):
         os.makedirs(outdir)
     files_created = []
@@ -65,7 +68,7 @@ def fetch_records(inspire_pattern, list_size, outdir=None):
     def write_to_file(records, startpoint):
         """Write records to file.
 
-        Ideally n_records == list_size
+        Should be n_records == list_size
         """
         n_records = get_number_of_records_in_batch(records)
         _, outfile = mkstemp(prefix="records" + str(startpoint) + "_", dir=outdir, suffix=".xml")
@@ -108,9 +111,10 @@ def fetch_records(inspire_pattern, list_size, outdir=None):
     # Get total number of search results
     total_amount = get_total_number_of_records(records)
     if not total_amount:
-        print("No records found.")
-        sys.exit()
-    print("Total amount of results: " + total_amount)
+        print("No records found with pattern " + inspire_pattern)  # FIXME: this is messy
+        return None
+    print("Total amount of results: " + total_amount + " with pattern " +
+          inspire_pattern) # FIXME: this is messy
 
     # Get all the rest
     while startpoint < int(total_amount):
@@ -194,7 +198,7 @@ def main(argv=None):
     print('Output dir is ' + outdir)
     print("Inspire search pattern: " + inspire_pattern)
 
-    # TEST pattern:
+    # Test pattern:
     # inspire_pattern = 'tc proceedings and 773__p:Nucl.Instrum.Meth.'
     fetch_records(inspire_pattern, list_size, outdir=outdir)
 
