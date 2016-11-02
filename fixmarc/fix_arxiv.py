@@ -129,7 +129,7 @@ def get_fixed_arxiv_marc_fields(record):
     def check_correct_marc_035_exists(marc_035s):
         """Check if the 035 field with arxiv report_nr exists already."""
         for index, m35 in enumerate(marc_035s):
-            if "9" in m35 and "arxiv" in m35["9"].lower():
+            if "9" in m35["035"] and "arxiv" in m35["035"]["9"].lower():
                 return True
 
     marc_035s = marc_to_dict(record, "035")
